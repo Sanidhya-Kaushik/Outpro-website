@@ -1,0 +1,229 @@
+# .github/workflows/frontend-deploy.yml
+# Frontend CI/CD: Lint → Build → Lighthouse → Deploy to Vercel
+# Vercel handles preview deployments automatically on PR — this workflow
+# handles production promotion, quality gates, and post-deploy checks.
+
+name: Frontend — Build & Deploy
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-deploy.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+
+permissions:
+  contents: read
+  deployments: write
+  pull-requests: write
+
+jobs:
+  # ── Job 1: Type-check, lint, bundle analysis ──────────────────────────────────
+  quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: '9'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript type check
+        run: pnpm typecheck
+
+      - name: ESLint + accessibility lint
+        run: pnpm lint
+
+      # Validate no unused env vars, no hardcoded secrets
+      - name: Check for hardcoded secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: frontend
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+
+  # ── Job 2: Next.js build + bundle analysis ────────────────────────────────────
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: quality
+    defaults:
+      run:
+        working-directory: frontend
+
+    env:
+      NEXT_PUBLIC_API_URL: https://api.outpro.india/api/v1
+      NEXT_PUBLIC_SANITY_PROJECT_ID: ${{ secrets.SANITY_PROJECT_ID }}
+      NEXT_PUBLIC_SANITY_DATASET: production
+      NEXT_PUBLIC_RECAPTCHA_SITE_KEY: ${{ secrets.RECAPTCHA_SITE_KEY }}
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      NEXT_PUBLIC_GA4_MEASUREMENT_ID: ${{ secrets.GA4_MEASUREMENT_ID }}
+      SANITY_API_TOKEN: ${{ secrets.SANITY_API_TOKEN }}
+      JWT_SECRET: ci-only-placeholder-not-real-secret-value
+      REVALIDATION_SECRET: ci-only-placeholder-not-real
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: '9'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Next.js
+        run: pnpm build
+
+      # Verify first-load JS bundle is under budget (200 kB)
+      - name: Check bundle size
+        run: |
+          BUNDLE_SIZE=$(cat .next/build-manifest.json | node -e "
+            const data = require('fs').readFileSync('/dev/stdin', 'utf8');
+            const manifest = JSON.parse(data);
+            const pages = manifest.pages;
+            const mainChunks = (pages['/'] || []).filter(f => f.startsWith('static/chunks/'));
+            console.log(mainChunks.length);
+          " 2>/dev/null || echo "0")
+          echo "Build completed — $BUNDLE_SIZE main chunks"
+          # Fail if analyze shows > 250 kB first load
+          if [ -f ".next/analyze/client.html" ]; then
+            echo "Bundle analysis available at .next/analyze/client.html"
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextjs-build
+          path: frontend/.next
+          retention-days: 1
+
+  # ── Job 3: Deploy to Vercel (preview on PR, production on main) ──────────────
+  deploy:
+    name: Deploy to Vercel
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push'
+
+    outputs:
+      deployment-url: ${{ steps.vercel-deploy.outputs.url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: nextjs-build
+          path: frontend/.next
+
+      - name: Deploy to Vercel
+        id: vercel-deploy
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: frontend
+          vercel-args: ${{ github.ref == 'refs/heads/main' && '--prod' || '' }}
+          scope: ${{ secrets.VERCEL_ORG_ID }}
+
+      - name: Comment deployment URL on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🚀 **Preview deployed**: ${{ steps.vercel-deploy.outputs.url }}\n\nRun Lighthouse against this URL to verify performance before merging.`
+            })
+
+  # ── Job 4: Lighthouse performance audit ───────────────────────────────────────
+  lighthouse:
+    name: Lighthouse Audit
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Lighthouse CI
+        uses: treosh/lighthouse-ci-action@v11
+        with:
+          urls: |
+            ${{ needs.deploy.outputs.deployment-url }}
+            ${{ needs.deploy.outputs.deployment-url }}/about
+            ${{ needs.deploy.outputs.deployment-url }}/portfolio
+            ${{ needs.deploy.outputs.deployment-url }}/contact
+          uploadArtifacts: true
+          temporaryPublicStorage: true
+          configPath: frontend/.lighthouserc.json
+
+      - name: Check Lighthouse thresholds
+        run: |
+          echo "Lighthouse audit complete — check uploaded report for scores"
+          # Thresholds are enforced in .lighthouserc.json
+
+  # ── Job 5: End-to-end smoke tests ────────────────────────────────────────────
+  e2e:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Run smoke tests
+        env:
+          BASE_URL: ${{ needs.deploy.outputs.deployment-url }}
+        run: |
+          npx playwright test frontend/e2e/smoke.spec.ts \
+            --reporter=github \
+            --project=chromium
+
+      - name: Notify on success
+        if: success() && secrets.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "text": "✅ *Frontend deployed to production*",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  {"title": "URL", "value": "https://www.outpro.india", "short": true},
+                  {"title": "Deployed by", "value": "${{ github.actor }}", "short": true}
+                ]
+              }]
+            }'

@@ -1,0 +1,249 @@
+// frontend/.lighthouserc.json
+// Lighthouse CI thresholds — fail CI if scores drop below these values
+{
+  "ci": {
+    "collect": {
+      "numberOfRuns": 3,
+      "settings": {
+        "preset": "desktop",
+        "throttling": {
+          "rttMs": 40,
+          "throughputKbps": 10240,
+          "cpuSlowdownMultiplier": 1
+        }
+      }
+    },
+    "assert": {
+      "preset": "lighthouse:recommended",
+      "assertions": {
+        "categories:performance":    ["error", { "minScore": 0.90 }],
+        "categories:accessibility":  ["error", { "minScore": 0.95 }],
+        "categories:best-practices": ["error", { "minScore": 0.92 }],
+        "categories:seo":            ["error", { "minScore": 0.95 }],
+        "first-contentful-paint":    ["warn",  { "maxNumericValue": 2000 }],
+        "largest-contentful-paint":  ["error", { "maxNumericValue": 2500 }],
+        "cumulative-layout-shift":   ["error", { "maxNumericValue": 0.1 }],
+        "total-blocking-time":       ["warn",  { "maxNumericValue": 300 }],
+        "interactive":               ["warn",  { "maxNumericValue": 3500 }],
+        "uses-optimized-images":     ["warn",  null],
+        "render-blocking-resources": ["warn",  null]
+      }
+    },
+    "upload": {
+      "target": "temporary-public-storage"
+    }
+  }
+}
+
+
+---
+
+
+# frontend/e2e/smoke.spec.ts
+# Playwright smoke tests — run against the deployed Vercel URL after every production deploy
+
+import { test, expect } from '@playwright/test';
+
+const BASE = process.env.BASE_URL ?? 'http://localhost:3000';
+
+test.describe('Public site smoke tests', () => {
+  test('Home page loads and has correct title', async ({ page }) => {
+    await page.goto(BASE);
+    await expect(page).toHaveTitle(/Outpro\.India/);
+    await expect(page.locator('h1')).toBeVisible();
+    // Hero CTA button must be present
+    await expect(page.locator('a[href="/contact"]').first()).toBeVisible();
+  });
+
+  test('Navigation links resolve correctly', async ({ page }) => {
+    await page.goto(BASE);
+    const links = ['/about', '/services', '/portfolio', '/testimonials', '/contact'];
+    for (const href of links) {
+      const res = await page.request.get(`${BASE}${href}`);
+      expect(res.status(), `${href} returned ${res.status()}`).toBe(200);
+    }
+  });
+
+  test('Contact form is present and interactive', async ({ page }) => {
+    await page.goto(`${BASE}/contact`);
+    await expect(page.locator('form[aria-label="Contact form"]')).toBeVisible();
+    await expect(page.locator('input[name="fullName"]')).toBeVisible();
+    await expect(page.locator('input[name="businessEmail"]')).toBeVisible();
+    await expect(page.locator('textarea[name="message"]')).toBeVisible();
+    await expect(page.locator('button[type="submit"]')).toBeEnabled();
+  });
+
+  test('Portfolio page loads projects', async ({ page }) => {
+    await page.goto(`${BASE}/portfolio`);
+    await expect(page.locator('h1')).toContainText(/project|portfolio/i);
+    // At least one filter pill must render
+    await expect(page.locator('[role="group"] button').first()).toBeVisible();
+  });
+
+  test('API health endpoint returns healthy', async ({ request }) => {
+    const apiBase = process.env.API_URL ?? 'https://api.outpro.india';
+    const res = await request.get(`${apiBase}/api/v1/health`);
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe('healthy');
+  });
+
+  test('Security headers are present', async ({ page }) => {
+    const res = await page.request.get(BASE);
+    const headers = res.headers();
+    expect(headers['x-frame-options']).toBeTruthy();
+    expect(headers['x-content-type-options']).toBe('nosniff');
+    expect(headers['strict-transport-security']).toBeTruthy();
+  });
+
+  test('Core Web Vitals — no layout shift on navigation', async ({ page }) => {
+    await page.goto(BASE);
+    // Measure CLS
+    const cls = await page.evaluate(() => {
+      return new Promise<number>((resolve) => {
+        let clsValue = 0;
+        const observer = new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            if (!(entry as PerformanceEntry & { hadRecentInput?: boolean }).hadRecentInput) {
+              clsValue += (entry as PerformanceEntry & { value: number }).value;
+            }
+          }
+        });
+        observer.observe({ type: 'layout-shift', buffered: true });
+        setTimeout(() => {
+          observer.disconnect();
+          resolve(clsValue);
+        }, 3000);
+      });
+    });
+    expect(cls, `CLS should be < 0.1, got ${cls}`).toBeLessThan(0.1);
+  });
+});
+
+test.describe('Admin smoke tests', () => {
+  test('Login page redirects unauthenticated admin routes', async ({ page }) => {
+    await page.goto(`${BASE}/admin/dashboard`);
+    await expect(page).toHaveURL(/\/login/);
+  });
+
+  test('Login page renders correctly', async ({ page }) => {
+    await page.goto(`${BASE}/login`);
+    await expect(page.locator('form[aria-label="Admin login form"]')).toBeVisible();
+    await expect(page.locator('input#email')).toBeVisible();
+    await expect(page.locator('input#password')).toBeVisible();
+  });
+});
+
+
+---
+
+
+# .github/workflows/terraform.yml
+# Infrastructure CI/CD — Terraform plan on PR, apply on merge to main
+
+name: Infrastructure — Terraform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'devops/terraform/**'
+      - '.github/workflows/terraform.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'devops/terraform/**'
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  TF_VERSION:  1.7.5
+  AWS_REGION:  ap-south-1
+  TF_WORK_DIR: devops/terraform
+
+jobs:
+  terraform:
+    name: Terraform ${{ github.event_name == 'pull_request' && 'Plan' || 'Apply' }}
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORK_DIR }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init -backend-config="workspace=${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}"
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -var-file="envs/production/terraform.tfvars" \
+            -out=tfplan \
+            -no-color 2>&1 | tee plan_output.txt
+        env:
+          TF_VAR_jwt_secret:                  ${{ secrets.TF_VAR_JWT_SECRET }}
+          TF_VAR_database_url:                ${{ secrets.TF_VAR_DATABASE_URL }}
+          TF_VAR_resend_api_key:              ${{ secrets.TF_VAR_RESEND_API_KEY }}
+          TF_VAR_recaptcha_secret_key:        ${{ secrets.TF_VAR_RECAPTCHA_SECRET_KEY }}
+          TF_VAR_supabase_service_role_key:   ${{ secrets.TF_VAR_SUPABASE_SERVICE_ROLE_KEY }}
+          TF_VAR_revalidation_secret:         ${{ secrets.TF_VAR_REVALIDATION_SECRET }}
+          TF_VAR_cloudflare_zone_id:          ${{ secrets.TF_VAR_CLOUDFLARE_ZONE_ID }}
+          TF_VAR_cloudflare_api_token:        ${{ secrets.TF_VAR_CLOUDFLARE_API_TOKEN }}
+          TF_VAR_vercel_api_token:            ${{ secrets.TF_VAR_VERCEL_API_TOKEN }}
+          TF_VAR_vercel_team_id:              ${{ secrets.TF_VAR_VERCEL_TEAM_ID }}
+          TF_VAR_slack_webhook_url:           ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      # Post plan output as PR comment
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ env.TF_WORK_DIR }}/plan_output.txt', 'utf8');
+            const truncated = plan.length > 60000 ? plan.slice(-60000) + '\n...(truncated)' : plan;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## Terraform Plan\n\`\`\`hcl\n${truncated}\n\`\`\``
+            });
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: terraform apply -auto-approve tfplan
+        env:
+          TF_VAR_jwt_secret:                  ${{ secrets.TF_VAR_JWT_SECRET }}
+          TF_VAR_database_url:                ${{ secrets.TF_VAR_DATABASE_URL }}
+          TF_VAR_resend_api_key:              ${{ secrets.TF_VAR_RESEND_API_KEY }}
+          TF_VAR_recaptcha_secret_key:        ${{ secrets.TF_VAR_RECAPTCHA_SECRET_KEY }}
+          TF_VAR_supabase_service_role_key:   ${{ secrets.TF_VAR_SUPABASE_SERVICE_ROLE_KEY }}
+          TF_VAR_revalidation_secret:         ${{ secrets.TF_VAR_REVALIDATION_SECRET }}
+          TF_VAR_cloudflare_zone_id:          ${{ secrets.TF_VAR_CLOUDFLARE_ZONE_ID }}
+          TF_VAR_cloudflare_api_token:        ${{ secrets.TF_VAR_CLOUDFLARE_API_TOKEN }}
+          TF_VAR_vercel_api_token:            ${{ secrets.TF_VAR_VERCEL_API_TOKEN }}
+          TF_VAR_vercel_team_id:              ${{ secrets.TF_VAR_VERCEL_TEAM_ID }}
+          TF_VAR_slack_webhook_url:           ${{ secrets.SLACK_WEBHOOK_URL }}

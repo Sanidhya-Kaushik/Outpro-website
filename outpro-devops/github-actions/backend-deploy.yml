@@ -1,0 +1,339 @@
+# .github/workflows/backend-deploy.yml
+# Backend CI/CD: Test → Build → Push to ECR → Deploy to ECS Fargate
+# Triggered on push to main (production) or develop (staging)
+
+name: Backend — Build & Deploy
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-deploy.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+
+permissions:
+  id-token: write    # Required for OIDC AWS auth (no long-lived access keys)
+  contents: read
+  security-events: write
+
+env:
+  AWS_REGION:       ap-south-1
+  ECR_REPO_NAME:    outpro-production-api
+  ECS_CLUSTER:      outpro-production-cluster
+  ECS_SERVICE:      outpro-production-api
+  CONTAINER_NAME:   api
+
+jobs:
+  # ── Job 1: Lint, type-check, security audit ─────────────────────────────────
+  quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: '9'
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: backend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript type check
+        run: pnpm typecheck
+
+      - name: ESLint
+        run: pnpm lint
+
+      - name: Security audit
+        run: pnpm audit --audit-level=critical
+
+      # SAST with CodeQL
+      - name: Initialize CodeQL
+        if: github.ref == 'refs/heads/main'
+        uses: github/codeql-action/init@v3
+        with:
+          languages: typescript
+
+      - name: CodeQL Analysis
+        if: github.ref == 'refs/heads/main'
+        uses: github/codeql-action/analyze@v3
+
+  # ── Job 2: Unit + integration tests ──────────────────────────────────────────
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: quality
+    defaults:
+      run:
+        working-directory: backend
+
+    env:
+      NODE_ENV: test
+      JWT_SECRET: test-secret-that-is-64-characters-long-for-ci-pipeline-00000000
+      DATABASE_URL: postgresql://test:test@localhost:5432/outpro_test
+      REVALIDATION_SECRET: test-revalidation-secret-32-chars!!
+      RECAPTCHA_SECRET_KEY: test-key
+      RECAPTCHA_MIN_SCORE: '0.5'
+      RESEND_API_KEY: test-resend-key
+      EMAIL_FROM: test@outpro.india
+      EMAIL_ADMIN_NOTIFY: leads@outpro.india
+      SUPABASE_URL: https://test.supabase.co
+      SUPABASE_SERVICE_ROLE_KEY: test-key
+      ALLOWED_ORIGINS: http://localhost:3000
+      LOG_LEVEL: error
+      LOG_DIR: /tmp/test-logs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: '9'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: backend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests with coverage
+        run: pnpm test:coverage
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          directory: backend/coverage
+          flags: backend
+
+  # ── Job 3: Docker build + push to ECR ────────────────────────────────────────
+  build:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'  # Only on push, not PR
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
+      ecr-image: ${{ steps.build-push.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # OIDC-based AWS auth — no long-lived credentials needed
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-deploy
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Generate image metadata with semantic version tags
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO_NAME }}
+          tags: |
+            type=sha,prefix=,suffix=,format=short
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build with GitHub Actions cache — dramatically faster subsequent builds
+      - name: Build and push image
+        id: build-push
+        uses: docker/build-push-action@v5
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Multi-platform for ARM Graviton support (cost savings)
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BUILD_VERSION=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+
+      # Vulnerability scan on the built image
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO_NAME }}:${{ steps.meta.outputs.version }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'  # Fail on critical/high vulns in production
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+  # ── Job 4: Deploy to ECS ──────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy → Staging
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: https://api-staging.outpro.india/api/v1/health
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_STAGING_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Deploy to ECS staging
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: .aws/task-definition-staging.json
+          service: outpro-staging-api
+          cluster: outpro-staging-cluster
+          wait-for-service-stability: true
+          image-ids: |
+            container-name=${{ env.CONTAINER_NAME }}
+            image=${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO_NAME }}:${{ needs.build.outputs.image-tag }}
+
+      - name: Run smoke tests against staging
+        run: |
+          BASE="https://api-staging.outpro.india/api/v1"
+          echo "Testing health endpoint..."
+          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$BASE/health")
+          [ "$STATUS" = "200" ] || (echo "Health check failed: $STATUS" && exit 1)
+          echo "Testing public portfolio endpoint..."
+          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$BASE/portfolio")
+          [ "$STATUS" = "200" ] || (echo "Portfolio endpoint failed: $STATUS" && exit 1)
+          echo "All smoke tests passed ✓"
+
+  deploy-production:
+    name: Deploy → Production
+    runs-on: ubuntu-latest
+    needs: [build, deploy-staging]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://api.outpro.india/api/v1/health
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PROD_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Download current task definition from ECS (source of truth)
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition outpro-production-api \
+            --query taskDefinition \
+            > task-definition.json
+
+      # Inject new image into the existing task definition
+      - name: Inject new image into task definition
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO_NAME }}:${{ needs.build.outputs.image-tag }}
+
+      # Deploy with circuit breaker — auto-rollback on health check failure
+      - name: Deploy to ECS production
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          # codedeploy-appspec if using blue/green — here using rolling
+          force-new-deployment: true
+
+      # Post-deployment smoke test
+      - name: Production smoke test
+        run: |
+          BASE="https://api.outpro.india/api/v1"
+          for i in 1 2 3; do
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$BASE/health" || echo "000")
+            [ "$STATUS" = "200" ] && { echo "Health check passed ✓"; break; }
+            [ "$i" = "3" ] && { echo "Health check failed after 3 attempts"; exit 1; }
+            echo "Attempt $i failed ($STATUS), retrying in 30s..."
+            sleep 30
+          done
+
+      - name: Notify Slack on success
+        if: success() && secrets.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "text": "✅ *Backend deployed to production*",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  {"title": "Version", "value": "${{ needs.build.outputs.image-tag }}", "short": true},
+                  {"title": "Deployed by", "value": "${{ github.actor }}", "short": true},
+                  {"title": "Commit", "value": "${{ github.event.head_commit.message }}", "short": false}
+                ]
+              }]
+            }'
+
+      - name: Notify Slack on failure
+        if: failure() && secrets.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "text": "🚨 *Backend deployment FAILED*",
+              "attachments": [{
+                "color": "danger",
+                "fields": [
+                  {"title": "Version", "value": "${{ needs.build.outputs.image-tag }}", "short": true},
+                  {"title": "Triggered by", "value": "${{ github.actor }}", "short": true},
+                  {"title": "Action", "value": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}", "short": false}
+                ]
+              }]
+            }'

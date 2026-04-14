@@ -1,0 +1,71 @@
+# docker-compose.yml
+# Local development stack: API + PostgreSQL + Redis
+
+version: '3.9'
+
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: outpro
+      POSTGRES_PASSWORD: outpro_dev_password
+      POSTGRES_DB: outpro_india
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d  # Auto-run migrations on first start
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U outpro -d outpro_india']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (for Upstash-compatible rate limiting in dev) ─────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── API Server ───────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      target: builder  # Use builder stage in dev for source maps
+    restart: unless-stopped
+    env_file: .env.local
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://outpro:outpro_dev_password@postgres:5432/outpro_india
+    ports:
+      - '5000:5000'
+    volumes:
+      - ./src:/app/src       # Hot-reload source
+      - ./logs:/app/logs     # Persistent logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ['pnpm', 'dev']
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -f http://localhost:5000/api/v1/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  postgres_data:
+  redis_data:
