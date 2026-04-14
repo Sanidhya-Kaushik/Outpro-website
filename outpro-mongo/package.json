@@ -1,0 +1,22 @@
+{
+  "name": "outpro-india-mongodb",
+  "version": "1.0.0",
+  "description": "MongoDB/Mongoose database layer for Outpro.India",
+  "main": "dist/models/index.js",
+  "scripts": {
+    "seed": "npx ts-node src/seeds/seed.ts",
+    "seed:prod": "NODE_ENV=production npx ts-node src/seeds/seed.ts",
+    "build": "tsc --outDir dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "mongoose": "^8.3.0"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/node": "^20.12.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  }
+}
