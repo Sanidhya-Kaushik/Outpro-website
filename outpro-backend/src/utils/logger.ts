@@ -22,7 +22,7 @@ const consoleFormat = combine(
 
 // ── Detect serverless (Vercel) ────────────────────────────────────────────────
 
-const isServerless = process.env.VERCEL === '1';
+const isServerless = !!process.env.VERCEL;
 
 // ── Transports ────────────────────────────────────────────────────────────────
 
