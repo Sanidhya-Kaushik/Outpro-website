@@ -9,7 +9,7 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
 COPY package.json pnpm-lock.yaml* ./
-RUN npm install
+RUN pnpm install --frozen-lockfile --prod=false
 
 # ── Stage 2: Build TypeScript ─────────────────────────────────────────────────
 FROM node:20-alpine AS builder
