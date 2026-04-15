@@ -1,5 +1,4 @@
 // src/utils/logger.ts
-// Structured JSON logger — Winston with daily rotating files + console transport
 
 import winston from 'winston';
 import DailyRotateFile from 'winston-daily-rotate-file';
@@ -21,19 +20,23 @@ const consoleFormat = combine(
   simple(),
 );
 
+// ── Detect Vercel environment ─────────────────────────────────────────────────
+
+const isVercel = !!process.env.VERCEL;
+
 // ── Transports ────────────────────────────────────────────────────────────────
 
 const transports: winston.transport[] = [];
 
-// Always log to console
+// ✅ Always log to console
 transports.push(
   new winston.transports.Console({
     format: env.NODE_ENV === 'production' ? jsonFormat : consoleFormat,
   }),
 );
 
-// Rotate log files in production / staging
-if (env.NODE_ENV !== 'test') {
+// ❌ Disable file logging on Vercel
+if (!isVercel && env.NODE_ENV !== 'test') {
   transports.push(
     new DailyRotateFile({
       filename: `${env.LOG_DIR}/app-%DATE%.log`,
@@ -45,7 +48,6 @@ if (env.NODE_ENV !== 'test') {
     }),
   );
 
-  // Separate file for errors only
   transports.push(
     new DailyRotateFile({
       level: 'error',
@@ -67,7 +69,7 @@ export const logger = winston.createLogger({
   exitOnError: false,
 });
 
-// ── HTTP request logger stream (Morgan integration) ───────────────────────────
+// ── HTTP request logger stream ────────────────────────────────────────────────
 
 export const httpLogStream = {
   write: (message: string) => {
