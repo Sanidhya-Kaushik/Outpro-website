@@ -12,7 +12,7 @@
     "test": "vitest",
     "test:coverage": "vitest --coverage",
     "migrate": "node -r tsx/cjs src/config/migrate.ts",
-    "audit": "pnpm audit --audit-level=critical"
+    "audit": "npm audit --audit-level=critical"
   },
   "dependencies": {
     "@upstash/ratelimit": "^1.0.1",
