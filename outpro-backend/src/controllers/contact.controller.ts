@@ -74,7 +74,7 @@ export const ContactController = {
   async getLeads(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const parsedQuery = leadQuerySchema.parse(req.query);
-      const { page, limit, offset } = parsePagination(parsedQuery);
+      const { page : _page, limit, offset } = parsePagination(parsedQuery);
       const result = await LeadModel.findMany({ ...parsedQuery, limit, offset });
       successResponse(res, result);
     } catch (err) {
@@ -178,7 +178,7 @@ export const ContactController = {
         action: 'lead.delete',
         targetTable: 'contact_leads',
         targetId: id,
-        payload: { deletedEmail: existing.businessEmail },
+        payload: { deletedEmail: existing.business_email },
         ipAddress: req.ip,
         userAgent: req.headers['user-agent'],
       });

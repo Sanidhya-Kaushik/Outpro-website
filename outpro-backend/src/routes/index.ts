@@ -3,7 +3,7 @@
 
 import { Router } from 'express';
 import multer from 'multer';
-import { fromBuffer } from 'file-type';
+import { fileTypeFromBuffer } from 'file-type';
 import { authenticate, authorise, validate, validateWebhookSecret } from '../middleware';
 import {
   AuthController, ContactController, PortfolioController,
@@ -46,7 +46,7 @@ const upload = multer({
 async function validateMagicBytes(req: import('express').Request, _res: import('express').Response, next: import('express').NextFunction) {
   if (!req.file) return next();
   try {
-    const detected = await fromBuffer(req.file.buffer);
+    const detected = await fileTypeFromBuffer(req.file.buffer);
     if (!detected || !ALLOWED_MIME.has(detected.mime)) {
       return next(new AppError('File content does not match declared MIME type', 400, 'INVALID_FILE_TYPE'));
     }

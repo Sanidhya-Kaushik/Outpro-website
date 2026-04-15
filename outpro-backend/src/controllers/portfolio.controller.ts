@@ -20,7 +20,7 @@ export const PortfolioController = {
   async list(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const parsedQuery = portfolioQuerySchema.parse(req.query);
-      const { page, limit, offset } = parsePagination(parsedQuery);
+      const { page: _page, limit, offset } = parsePagination(parsedQuery);
       const result = await PortfolioModel.findMany({ ...parsedQuery, limit, offset });
       successResponse(res, result);
     } catch (err) {

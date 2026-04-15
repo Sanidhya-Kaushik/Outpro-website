@@ -1,8 +1,11 @@
 // src/models/index.ts
 // Data-access layer — parameterised SQL only, no ORM, no string interpolation
 
+import { AdminRole } from '../types/api.types';
+import { ScanStatus } from '../types/api.types';
+
 import { PoolClient } from 'pg';
-import { query, withTransaction } from '../config/database';
+import { query } from '../config/database';
 import {
   AdminUser,
   ContactLead,
@@ -280,7 +283,7 @@ export const LeadModel = {
 // PORTFOLIO MODEL
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export const PortfolioModel = {
+export const PortfolioModel: any = {
   async create(data: {
     slug: string; title: string; clientName: string; category: string;
     description?: string; coverImageId?: string; isFeatured: boolean;

@@ -20,9 +20,9 @@ const consoleFormat = combine(
   simple(),
 );
 
-// ── Detect Vercel environment ─────────────────────────────────────────────────
+// ── Detect serverless (Vercel) ────────────────────────────────────────────────
 
-const isVercel = !!process.env.VERCEL;
+const isServerless = process.env.VERCEL === '1';
 
 // ── Transports ────────────────────────────────────────────────────────────────
 
@@ -35,8 +35,8 @@ transports.push(
   }),
 );
 
-// ❌ Disable file logging on Vercel
-if (!isVercel && env.NODE_ENV !== 'test') {
+// ✅ File logging ONLY for non-serverless environments
+if (!isServerless && env.NODE_ENV !== 'test') {
   transports.push(
     new DailyRotateFile({
       filename: `${env.LOG_DIR}/app-%DATE%.log`,
@@ -64,12 +64,12 @@ if (!isVercel && env.NODE_ENV !== 'test') {
 // ── Logger instance ───────────────────────────────────────────────────────────
 
 export const logger = winston.createLogger({
-  level: env.LOG_LEVEL,
+  level: env.LOG_LEVEL || 'info', // fallback safety
   transports,
   exitOnError: false,
 });
 
-// ── HTTP request logger stream ────────────────────────────────────────────────
+// ── HTTP request logger stream (Morgan integration) ───────────────────────────
 
 export const httpLogStream = {
   write: (message: string) => {

@@ -24,7 +24,7 @@ export function requestId(req: Request, res: Response, next: NextFunction): void
 
 export async function authenticate(
   req: Request,
-  res: Response,
+  _res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
@@ -79,7 +79,7 @@ export async function authenticate(
 // ── Role-Based Authorisation ──────────────────────────────────────────────────
 
 export function authorise(...roles: AdminRole[]) {
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return (req: Request, _res: Response, next: NextFunction): void => {
     const user = (req as AuthenticatedRequest).user;
     if (!user || !roles.includes(user.role)) {
       return next(AppError.forbidden('Insufficient permissions to access this resource'));
